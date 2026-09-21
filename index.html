@@ -1,0 +1,430 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport"
+      content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>حارس الساحة</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#101726;
+color:#fff;font-family:system-ui;overscroll-behavior:none}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+button{font:700 17px system-ui;color:white;border:2px solid #ffffff55;
+background:#253750;touch-action:none;user-select:none;-webkit-user-select:none}
+#hud{position:fixed;top:max(12px,env(safe-area-inset-top));left:16px;right:16px;
+display:flex;align-items:center;gap:12px;pointer-events:none}
+#status{flex:1;text-shadow:0 2px 3px #000;font-weight:700}
+#pause{pointer-events:auto;border-radius:12px;padding:10px}
+#stick{position:fixed;left:max(22px,env(safe-area-inset-left));
+bottom:max(24px,env(safe-area-inset-bottom));width:132px;height:132px;
+border-radius:50%;background:#ffffff12;border:2px solid #ffffff40;
+touch-action:none;direction:ltr}
+#knob{position:absolute;left:41px;top:41px;width:46px;height:46px;
+border-radius:50%;background:#9bdaee99;pointer-events:none}
+#actions{position:fixed;right:max(22px,env(safe-area-inset-right));
+bottom:max(28px,env(safe-area-inset-bottom));display:flex;gap:14px;
+align-items:flex-end}
+#attack{width:88px;height:88px;border-radius:50%;background:#a64249}
+#dash{width:72px;height:72px;border-radius:50%;background:#315d97;font-size:15px}
+#overlay{position:fixed;inset:0;background:#070c18d9;display:flex;
+align-items:center;justify-content:center;padding:24px;z-index:5}
+#panel{text-align:center;max-width:440px;background:#18243b;
+padding:26px;border:1px solid #ffffff33;border-radius:22px}
+#panel h1{margin-top:0}
+#panel p{line-height:1.9;color:#d0e2f4}
+#start{padding:14px 30px;border-radius:14px;background:#28796b}
+@media(max-height:440px){
+#stick{width:108px;height:108px;bottom:16px}
+#knob{left:29px;top:29px}
+#actions{bottom:16px}
+#attack{width:76px;height:76px}
+#dash{width:64px;height:64px}
+#panel{padding:15px}
+}
+</style>
+</head>
+<body>
+<canvas id="game" aria-label="ساحة القتال"></canvas>
+<div id="hud">
+  <div id="status"></div>
+  <button id="pause" aria-label="إيقاف مؤقت">Ⅱ</button>
+</div>
+<div id="stick" aria-label="عصا الحركة"><div id="knob"></div></div>
+<div id="actions">
+  <button id="dash">اندفاع</button>
+  <button id="attack">هجوم</button>
+</div>
+<div id="overlay">
+  <div id="panel">
+    <h1 id="title">حارس الساحة</h1>
+    <p id="message">
+      حرّك العصا بيدك اليسرى واضغط الهجوم بيدك اليمنى.
+      اقترب من الأعداء واضربهم، واستخدم الاندفاع لتفادي ضرباتهم.
+      يمكنك الاستمرار بالضغط للهجوم المتكرر.
+      الوضع الأفقي أفضل، والرأسي مدعوم.
+    </p>
+    <button id="start">ابدأ اللعب</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const canvas = $("game"), ctx = canvas.getContext("2d");
+const status = $("status"), stick = $("stick"), knob = $("knob");
+const attackButton = $("attack"), dashButton = $("dash");
+const overlay = $("overlay");
+const WORLD = {w:1600,h:1200};
+const C = {
+  speed:220, attackRange:96, attackCooldown:.38, damage:25,
+  invulnerability:.55, dashCooldown:1.4, dashDuration:.16,
+  dashSpeed:720, enemySpeed:92, enemyDamage:12
+};
+let width=1,height=1,scale=1,lastTime=0,mode="menu";
+let player,enemies=[],particles=[],wave=0,kills=0,nextWave=0;
+let swing=0,swingAngle=0,shake=0,hudCache="";
+const input={x:0,y:0,stickId:null,attackId:null};
+const camera={x:0,y:0};
+const clamp=(n,a,b)=>Math.max(a,Math.min(b,n));
+const distance=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+
+function resize(){
+  width=innerWidth;height=innerHeight;
+  const dpr=Math.min(devicePixelRatio||1,2);
+  canvas.width=Math.round(width*dpr);
+  canvas.height=Math.round(height*dpr);
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  scale=clamp(Math.min(width,height)/520,.58,1.4);
+}
+addEventListener("resize",resize);
+resize();
+
+function clearInput(){
+  input.x=input.y=0;
+  input.stickId=input.attackId=null;
+  knob.style.transform="";
+  attackButton.style.filter="";
+}
+function show(title,message,label){
+  $("title").textContent=title;
+  $("message").textContent=message;
+  $("start").textContent=label;
+  overlay.style.display="flex";
+}
+function reset(){
+  player={x:800,y:600,r:17,hp:100,maxHp:100,face:0,
+    cooldown:0,inv:0,dash:0,dashCooldown:0,dx:1,dy:0};
+  enemies=[];particles=[];wave=0;kills=0;nextWave=.7;
+  swing=shake=0;clearInput();
+  mode="playing";overlay.style.display="none";
+}
+function pause(){
+  if(mode!=="playing")return;
+  mode="paused";clearInput();
+  show("استراحة","اللعبة متوقفة. اضغط لاستكمال اللعب.","استكمال");
+}
+$("pause").onclick=pause;
+$("start").onclick=()=>{
+  if(mode==="paused"){
+    mode="playing";lastTime=performance.now();
+    overlay.style.display="none";clearInput();
+  }else reset();
+};
+document.addEventListener("visibilitychange",()=>{
+  if(document.hidden)pause();
+});
+addEventListener("blur",pause);
+document.addEventListener("contextmenu",e=>e.preventDefault());
+
+function moveStick(e){
+  const box=stick.getBoundingClientRect();
+  const radius=box.width*.32;
+  let x=e.clientX-box.left-box.width/2;
+  let y=e.clientY-box.top-box.height/2;
+  const length=Math.hypot(x,y);
+  if(length>radius){x*=radius/length;y*=radius/length}
+  input.x=x/radius;input.y=y/radius;
+  knob.style.transform=`translate(${x}px,${y}px)`;
+}
+stick.addEventListener("pointerdown",e=>{
+  e.preventDefault();
+  if(mode!=="playing"||input.stickId!==null)return;
+  input.stickId=e.pointerId;stick.setPointerCapture(e.pointerId);
+  moveStick(e);
+});
+stick.addEventListener("pointermove",e=>{
+  if(e.pointerId===input.stickId)moveStick(e);
+});
+function releaseStick(e){
+  if(e.pointerId!==input.stickId)return;
+  input.stickId=null;input.x=input.y=0;knob.style.transform="";
+}
+for(const event of ["pointerup","pointercancel","lostpointercapture"])
+  stick.addEventListener(event,releaseStick);
+
+attackButton.addEventListener("pointerdown",e=>{
+  e.preventDefault();
+  if(mode!=="playing"||input.attackId!==null)return;
+  input.attackId=e.pointerId;
+  attackButton.setPointerCapture(e.pointerId);
+  attackButton.style.filter="brightness(1.35)";
+});
+function releaseAttack(e){
+  if(e.pointerId!==input.attackId)return;
+  input.attackId=null;attackButton.style.filter="";
+}
+for(const event of ["pointerup","pointercancel","lostpointercapture"])
+  attackButton.addEventListener(event,releaseAttack);
+
+dashButton.addEventListener("pointerdown",e=>{
+  e.preventDefault();
+  if(mode!=="playing"||player.dashCooldown>0)return;
+  const length=Math.hypot(input.x,input.y);
+  player.dx=length>.1?input.x/length:Math.cos(player.face);
+  player.dy=length>.1?input.y/length:Math.sin(player.face);
+  player.dash=C.dashDuration;
+  player.dashCooldown=C.dashCooldown;
+  player.inv=Math.max(player.inv,C.dashDuration+.1);
+});
+
+function burst(x,y,color,count){
+  for(let i=0;i<count&&particles.length<160;i++){
+    const angle=Math.random()*Math.PI*2,speed=40+Math.random()*170;
+    particles.push({x,y,vx:Math.cos(angle)*speed,
+      vy:Math.sin(angle)*speed,life:.35,max:.35,color});
+  }
+}
+function setState(enemy,state,time=0){
+  enemy.state=state;enemy.timer=time;
+}
+function spawnWave(){
+  wave++;
+  const count=Math.min(3+wave*2,22);
+  for(let i=0;i<count;i++){
+    const angle=(i/count)*Math.PI*2+Math.random()*.3;
+    let x=clamp(player.x+Math.cos(angle)*420,35,WORLD.w-35);
+    let y=clamp(player.y+Math.sin(angle)*420,35,WORLD.h-35);
+    if(Math.hypot(x-player.x,y-player.y)<220){
+      x=player.x<WORLD.w/2?WORLD.w-80:80;
+      y=player.y<WORLD.h/2?WORLD.h-80:80;
+    }
+    const hp=45+Math.min(wave,12)*5;
+    enemies.push({x,y,r:18,hp,maxHp:hp,state:"Idle",
+      timer:.2+Math.random()*.7,angle:Math.random()*Math.PI*2,
+      cooldown:0,vx:0,vy:0,flash:0});
+  }
+  player.hp=Math.min(player.maxHp,player.hp+15);
+}
+function attack(){
+  if(player.cooldown>0||player.dash>0)return;
+  player.cooldown=C.attackCooldown;
+  let nearest=null,best=C.attackRange+40;
+  for(const enemy of enemies){
+    if(enemy.state==="Dead")continue;
+    const d=distance(player,enemy);
+    if(d<best){best=d;nearest=enemy}
+  }
+  if(nearest)player.face=Math.atan2(nearest.y-player.y,nearest.x-player.x);
+  swingAngle=player.face;swing=.16;
+  for(const enemy of enemies){
+    if(enemy.state==="Dead")continue;
+    const dx=enemy.x-player.x,dy=enemy.y-player.y;
+    const d=Math.hypot(dx,dy);
+    const dot=d>0?(dx*Math.cos(player.face)+dy*Math.sin(player.face))/d:1;
+    if(d>C.attackRange+enemy.r||dot<.15)continue;
+    enemy.hp=clamp(enemy.hp-C.damage,0,enemy.maxHp);
+    enemy.flash=.13;
+    const len=d||1;enemy.vx=dx/len*240;enemy.vy=dy/len*240;
+    burst(enemy.x,enemy.y,"#ffc478",7);
+    shake=Math.max(shake,3);
+    if(enemy.hp===0){
+      setState(enemy,"Dead",.35);kills++;
+      burst(enemy.x,enemy.y,"#ff7387",10);
+    }else setState(enemy,"Hurt",.2);
+  }
+}
+function damagePlayer(enemy){
+  if(player.inv>0||player.hp<=0)return;
+  player.hp=clamp(player.hp-C.enemyDamage,0,player.maxHp);
+  player.inv=C.invulnerability;shake=6;
+  burst(player.x,player.y,"#8ee9ff",9);
+  const dx=player.x-enemy.x,dy=player.y-enemy.y,d=Math.hypot(dx,dy)||1;
+  player.x=clamp(player.x+dx/d*22,player.r,WORLD.w-player.r);
+  player.y=clamp(player.y+dy/d*22,player.r,WORLD.h-player.r);
+  if(player.hp===0){
+    mode="dead";clearInput();
+    show("انتهت الجولة",
+      `وصلت إلى الموجة ${wave} وهزمت ${kills} من الأعداء.`,"العب من جديد");
+  }
+}
+function updateEnemy(enemy,dt){
+  enemy.timer-=dt;
+  enemy.cooldown=Math.max(0,enemy.cooldown-dt);
+  enemy.flash=Math.max(0,enemy.flash-dt);
+  if(enemy.state==="Dead")return;
+  if(enemy.state==="Hurt"){
+    enemy.x+=enemy.vx*dt;enemy.y+=enemy.vy*dt;
+    enemy.vx*=Math.exp(-12*dt);enemy.vy*=Math.exp(-12*dt);
+    if(enemy.timer<=0)setState(enemy,"Chase");
+  }else{
+    const dx=player.x-enemy.x,dy=player.y-enemy.y,d=Math.hypot(dx,dy);
+    switch(enemy.state){
+      case "Idle":
+        if(d<330)setState(enemy,"Chase");
+        else if(enemy.timer<=0)setState(enemy,"Patrol",1.4);
+        break;
+      case "Patrol":
+        enemy.x+=Math.cos(enemy.angle)*32*dt;
+        enemy.y+=Math.sin(enemy.angle)*32*dt;
+        if(d<360)setState(enemy,"Chase");
+        else if(enemy.timer<=0){
+          enemy.angle=Math.random()*Math.PI*2;
+          setState(enemy,"Idle",.45);
+        }
+        break;
+      case "Chase":
+        if(d>530)setState(enemy,"Patrol",1);
+        else if(d<55&&enemy.cooldown===0)setState(enemy,"Attack",.42);
+        else if(d>40){
+          const speed=C.enemySpeed+Math.min(wave*3,35);
+          enemy.x+=dx/(d||1)*speed*dt;
+          enemy.y+=dy/(d||1)*speed*dt;
+        }
+        break;
+      case "Attack":
+        if(enemy.timer<=0){
+          if(d<70)damagePlayer(enemy);
+          enemy.cooldown=.9;
+          setState(enemy,"Chase");
+        }
+        break;
+    }
+  }
+  enemy.x=clamp(enemy.x,enemy.r,WORLD.w-enemy.r);
+  enemy.y=clamp(enemy.y,enemy.r,WORLD.h-enemy.r);
+}
+function update(dt){
+  for(const key of ["cooldown","inv","dashCooldown"])
+    player[key]=Math.max(0,player[key]-dt);
+  swing=Math.max(0,swing-dt);
+  shake=Math.max(0,shake-dt*22);
+  if(player.dash>0){
+    const step=Math.min(dt,player.dash);
+    player.x+=player.dx*C.dashSpeed*step;
+    player.y+=player.dy*C.dashSpeed*step;
+    player.dash=Math.max(0,player.dash-dt);
+  }else{
+    player.x+=input.x*C.speed*dt;
+    player.y+=input.y*C.speed*dt;
+    if(Math.hypot(input.x,input.y)>.15)
+      player.face=Math.atan2(input.y,input.x);
+  }
+  player.x=clamp(player.x,player.r,WORLD.w-player.r);
+  player.y=clamp(player.y,player.r,WORLD.h-player.r);
+  if(input.attackId!==null)attack();
+
+  for(const enemy of enemies){
+    updateEnemy(enemy,dt);
+    if(mode!=="playing")return;
+  }
+  // العدد محدود بـ22: فصل بسيط لمنع تكدّس الأعداء.
+  for(let i=0;i<enemies.length;i++){
+    const a=enemies[i];if(a.state==="Dead")continue;
+    for(let j=i+1;j<enemies.length;j++){
+      const b=enemies[j];if(b.state==="Dead")continue;
+      let dx=b.x-a.x,dy=b.y-a.y,d=Math.hypot(dx,dy);
+      if(d>=34)continue;
+      if(d<.001){dx=1;dy=0;d=1}
+      const push=(34-d)*.5;
+      a.x=clamp(a.x-dx/d*push,a.r,WORLD.w-a.r);
+      a.y=clamp(a.y-dy/d*push,a.r,WORLD.h-a.r);
+      b.x=clamp(b.x+dx/d*push,b.r,WORLD.w-b.r);
+      b.y=clamp(b.y+dy/d*push,b.r,WORLD.h-b.r);
+    }
+  }
+  for(let i=enemies.length-1;i>=0;i--)
+    if(enemies[i].state==="Dead"&&enemies[i].timer<=0)enemies.splice(i,1);
+  if(enemies.length===0){
+    nextWave-=dt;
+    if(nextWave<=0){spawnWave();nextWave=1.2}
+  }
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i];p.life-=dt;
+    if(p.life<=0){particles.splice(i,1);continue}
+    p.x+=p.vx*dt;p.y+=p.vy*dt;
+  }
+}
+function circle(x,y,r,color){
+  ctx.fillStyle=color;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();
+}
+function bar(x,y,w,f,color){
+  ctx.fillStyle="#0a1020";ctx.fillRect(x-w/2,y,w,5);
+  ctx.fillStyle=color;ctx.fillRect(x-w/2,y,w*clamp(f,0,1),5);
+}
+function draw(){
+  ctx.fillStyle="#101726";ctx.fillRect(0,0,width,height);
+  if(!player)return;
+  const viewW=width/scale,viewH=height/scale;
+  camera.x=viewW<WORLD.w?clamp(player.x-viewW/2,0,WORLD.w-viewW):(WORLD.w-viewW)/2;
+  camera.y=viewH<WORLD.h?clamp(player.y-viewH/2,0,WORLD.h-viewH):(WORLD.h-viewH)/2;
+  ctx.save();
+  ctx.translate((Math.random()-.5)*shake,(Math.random()-.5)*shake);
+  ctx.scale(scale,scale);ctx.translate(-camera.x,-camera.y);
+  ctx.fillStyle="#1c2c39";ctx.fillRect(0,0,WORLD.w,WORLD.h);
+  ctx.strokeStyle="#ffffff09";ctx.lineWidth=1;
+  ctx.beginPath();
+  for(let x=0;x<=WORLD.w;x+=80){ctx.moveTo(x,0);ctx.lineTo(x,WORLD.h)}
+  for(let y=0;y<=WORLD.h;y+=80){ctx.moveTo(0,y);ctx.lineTo(WORLD.w,y)}
+  ctx.stroke();
+  ctx.strokeStyle="#66818e";ctx.lineWidth=8;ctx.strokeRect(0,0,WORLD.w,WORLD.h);
+
+  for(const enemy of enemies){
+    if(enemy.state==="Dead")ctx.globalAlpha=clamp(enemy.timer/.35,0,1);
+    if(enemy.state==="Attack"){
+      ctx.strokeStyle="#ff816b";ctx.lineWidth=3;
+      ctx.beginPath();ctx.arc(enemy.x,enemy.y,65,0,Math.PI*2);ctx.stroke();
+      circle(enemy.x,enemy.y,22+Math.max(0,.42-enemy.timer)*20,"#ff715333");
+    }
+    circle(enemy.x+2,enemy.y+5,enemy.r,"#00000044");
+    circle(enemy.x,enemy.y,enemy.r,enemy.flash>0?"#fff3ce":"#d85870");
+    const angle=Math.atan2(player.y-enemy.y,player.x-enemy.x);
+    circle(enemy.x+Math.cos(angle)*9,enemy.y+Math.sin(angle)*9,4,"#4b1830");
+    if(enemy.state!=="Dead")
+      bar(enemy.x,enemy.y-29,38,enemy.hp/enemy.maxHp,"#fa8190");
+    ctx.globalAlpha=1;
+  }
+  if(swing>0){
+    ctx.beginPath();ctx.moveTo(player.x,player.y);
+    ctx.arc(player.x,player.y,C.attackRange,swingAngle-1.35,swingAngle+1.35);
+    ctx.closePath();ctx.fillStyle="#8ff4dc77";ctx.fill();
+  }
+  ctx.globalAlpha=player.inv>0?.55+Math.sin(performance.now()*.045)*.2:1;
+  circle(player.x+2,player.y+5,player.r,"#00000066");
+  circle(player.x,player.y,player.r,player.dash>0?"#d7ffff":"#75dcca");
+  circle(player.x+Math.cos(player.face)*11,
+         player.y+Math.sin(player.face)*11,5,"#164944");
+  ctx.globalAlpha=1;
+  bar(player.x,player.y-30,46,player.hp/player.maxHp,"#82ebaa");
+  for(const p of particles){
+    ctx.globalAlpha=p.life/p.max;circle(p.x,p.y,3,p.color);
+  }
+  ctx.globalAlpha=1;ctx.restore();
+
+  const text=`♥ ${player.hp} / 100  |  الموجة ${wave}  |  هزمت ${kills}`;
+  if(text!==hudCache){status.textContent=text;hudCache=text}
+  const dashText=player.dashCooldown>0?player.dashCooldown.toFixed(1):"اندفاع";
+  if(dashButton.textContent!==dashText)dashButton.textContent=dashText;
+  const attackText=player.cooldown>0?"↻":"هجوم";
+  if(attackButton.textContent!==attackText)attackButton.textContent=attackText;
+}
+function frame(now){
+  const dt=Math.min(Math.max((now-lastTime)/1000,0),.033);
+  lastTime=now;
+  if(mode==="playing")update(dt);
+  draw();requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
